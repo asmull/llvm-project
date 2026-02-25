@@ -492,6 +492,13 @@ struct VPlanTransforms {
                                          VPCostContext &CostCtx,
                                          LoopVectorizationLegality &Legal);
 
+  /// \p MemOps must be updated to contain ones that haven't been processed by
+  /// the pass.
+  static void multiversionForUnitStridedMemOps(
+      VPlan &Plan, VPCostContext &CostCtx, LoopVectorizationLegality &Legal,
+      VPRecipeBuilder &RecipeBuilder, VFRange &Range,
+      SmallVectorImpl<VPInstruction *> &MemOps);
+
   /// Make VPlan-based scalarization decision prior to delegating to the ones
   /// made by the legacy CM.
   static void makeScalarizationDecisions(VPlan &Plan, VFRange &Range,
