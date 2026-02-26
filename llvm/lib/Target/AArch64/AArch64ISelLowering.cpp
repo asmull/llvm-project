@@ -17785,17 +17785,6 @@ void AArch64TargetLowering::getTgtMemIntrinsic(
     if (!OrderC || !SizeC)
       return;
 
-    unsigned SizeBits = SizeC->getZExtValue();
-    switch (SizeBits) {
-    case 8:
-    case 16:
-    case 32:
-    case 64:
-      break;
-    default:
-      return;
-    }
-
     switch (static_cast<AtomicOrderingCABI>(OrderC->getZExtValue())) {
     case AtomicOrderingCABI::relaxed:
       Info.order = AtomicOrdering::Monotonic;
@@ -17813,6 +17802,7 @@ void AArch64TargetLowering::getTgtMemIntrinsic(
     // Fill IntrinsicInfo so SelectionDAG builds correctly
     // typed/aligned atomic store MachineMemOperand.
     LLVMContext &Ctx = I.getContext();
+    unsigned SizeBits = SizeC->getZExtValue();
     Type *MemTy = IntegerType::get(Ctx, SizeBits);
     Info.opc = ISD::INTRINSIC_VOID;
     Info.memVT = EVT::getIntegerVT(Ctx, SizeBits);
@@ -17820,7 +17810,6 @@ void AArch64TargetLowering::getTgtMemIntrinsic(
     Info.offset = 0;
     Info.align = DL.getABITypeAlign(MemTy);
     Info.flags = MachineMemOperand::MOStore;
-    Info.ssid = SyncScope::System;
     Infos.push_back(Info);
     return;
   }
