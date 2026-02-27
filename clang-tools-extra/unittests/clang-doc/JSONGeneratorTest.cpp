@@ -177,7 +177,8 @@ TEST_F(JSONGeneratorTest, emitRecordJSON) {
         "End": true,
         "Param": "class T"
       }
-    ]
+    ],
+    "VerticalDisplay": false
   },
   "VirtualParents": [
     {
