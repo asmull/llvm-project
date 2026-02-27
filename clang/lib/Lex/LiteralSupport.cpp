@@ -385,10 +385,6 @@ static unsigned ProcessCharEscape(const char *ThisTokBegin,
           << EC.message();
       HadError = true;
     } else {
-      if (ResultCharConv.size() > 1)
-        Diag(Diags, Features, Loc, ThisTokBegin, EscapeBegin, ThisTokBuf,
-             diag::err_char_size_increased_after_conversion)
-            << ByteChar;
       ResultChar = ResultCharConv[0];
     }
   }
@@ -1885,8 +1881,7 @@ CharLiteralParser::CharLiteralParser(const char *begin, const char *end,
             PP.Diag(Loc, diag::err_character_too_large);
           }
           if (!HadError && Converter) {
-            assert(Kind != tok::wide_char_constant &&
-                   "Wide character translation not supported");
+            assert(isOrdinary() && "Only ordinary characters are supported");
             std::string UTF8String;
             convertUTF32ToUTF8String(
                 ArrayRef<char>((const char *)tmp_out_start, 4), UTF8String);
@@ -1897,9 +1892,11 @@ CharLiteralParser::CharLiteralParser(const char *begin, const char *end,
                   << EC.message();
               HadError = true;
             } else {
-              if (ConvertedChar.size() > 1)
+              if (ConvertedChar.size() > 1) {
+                HadError = true;
                 PP.Diag(Loc, diag::err_char_size_increased_after_conversion)
                     << UTF8String;
+              }
               *tmp_out_start = ConvertedChar[0];
             }
           }
@@ -2073,42 +2070,6 @@ StringLiteralParser::StringLiteralParser(ArrayRef<Token> StringToks,
       CharByteWidth(0), Kind(tok::unknown), ResultPtr(ResultBuf.data()),
       EvalMethod(EvalMethod), hadError(false), Pascal(false) {
   init(StringToks, Action);
-}
-
-static char *convertCharactersInPlace(char *ResultPtr, char *ResultPtrBefore,
-                                      const unsigned CharByteWidth,
-                                      bool &hadError,
-                                      llvm::TextEncodingConverter &Converter) {
-  assert(!hadError && "Unexpected call to convertCharactersInPlace");
-
-  SmallString<256> CpConv;
-  int ResultLength = ResultPtr - ResultPtrBefore;
-  assert(ResultLength % CharByteWidth == 0 &&
-         "Unexpected span of bytes for the characters.");
-  char *Cp = ResultPtrBefore;
-  if (Converter.convert(StringRef(Cp, ResultLength / CharByteWidth), CpConv)) {
-    hadError = true;
-    return ResultPtr;
-  }
-  if (CharByteWidth == 1) {
-    memcpy(Cp, CpConv.data(), CpConv.size());
-    return Cp + CpConv.size();
-  }
-  std::string UTF8String;
-  if (CharByteWidth == 4)
-    convertUTF32ToUTF8String(ArrayRef<char>(Cp, ResultLength), UTF8String);
-  else if (CharByteWidth == 2)
-    convertUTF16ToUTF8String(ArrayRef<char>(Cp, ResultLength), UTF8String);
-  if (Converter.convert(UTF8String, CpConv)) {
-    hadError = true;
-    return ResultPtr;
-  }
-  int NewCharByteWidth = ((int)CpConv.size()) / (ResultLength / CharByteWidth);
-  unsigned EndianOffset = llvm::sys::IsBigEndianHost ? CharByteWidth - 1 : 0;
-  for (int i = 0; i < (int)CpConv.size(); i += NewCharByteWidth)
-    memcpy(Cp + EndianOffset + i * CharByteWidth, CpConv.data() + i,
-           NewCharByteWidth);
-  return Cp + CpConv.size() * CharByteWidth;
 }
 
 void StringLiteralParser::init(ArrayRef<Token> StringToks,
@@ -2317,20 +2278,11 @@ void StringLiteralParser::init(ArrayRef<Token> StringToks,
         StringRef BeforeCRLF = RemainingTokenSpan.substr(0, CRLFPos);
         StringRef AfterCRLF = RemainingTokenSpan.substr(CRLFPos);
 
-        char *ResultPtrBefore = ResultPtr;
         // Copy everything before the \r\n sequence into the string literal.
-        if (CopyStringFragment(StringToks[i], ThisTokBegin, BeforeCRLF))
+        if (CopyStringFragment(StringToks[i], ThisTokBegin, BeforeCRLF,
+                               Converter))
           hadError = true;
 
-        if (!hadError && Converter) {
-          assert(Kind != tok::wide_string_literal &&
-                 "Wide character translation not supported");
-          ResultPtr = convertCharactersInPlace(
-              ResultPtr, ResultPtrBefore, CharByteWidth, hadError, *Converter);
-          if (hadError && Diags)
-            Diags->Report(StringToks[i].getLocation(),
-                          diag::err_exec_charset_conversion_failed);
-        }
         // Point into the \n inside the \r\n sequence and operate on the
         // remaining portion of the literal.
         RemainingTokenSpan = AfterCRLF.substr(1);
@@ -2365,22 +2317,11 @@ void StringLiteralParser::init(ArrayRef<Token> StringToks,
             ++ThisTokBuf;
           } while (ThisTokBuf != ThisTokEnd && ThisTokBuf[0] != '\\');
 
-          char *ResultPtrBefore = ResultPtr;
           // Copy the character span over.
           if (CopyStringFragment(StringToks[i], ThisTokBegin,
-                                 StringRef(InStart, ThisTokBuf - InStart)))
+                                 StringRef(InStart, ThisTokBuf - InStart),
+                                 Converter))
             hadError = true;
-
-          if (!hadError && Converter) {
-            assert(Kind != tok::wide_string_literal &&
-                   "Wide character translation not supported");
-            ResultPtr =
-                convertCharactersInPlace(ResultPtr, ResultPtrBefore,
-                                         CharByteWidth, hadError, *Converter);
-            if (hadError && Diags)
-              Diags->Report(StringToks[i].getLocation(),
-                            diag::err_exec_charset_conversion_failed);
-          }
           continue;
         }
         // Is this a Universal Character Name escape?
@@ -2479,12 +2420,28 @@ static const char *resyncUTF8(const char *Err, const char *End) {
 /// This function copies from Fragment, which is a sequence of bytes
 /// within Tok's contents (which begin at TokBegin) into ResultPtr.
 /// Performs widening for multi-byte characters.
-bool StringLiteralParser::CopyStringFragment(const Token &Tok,
-                                             const char *TokBegin,
-                                             StringRef Fragment) {
+bool StringLiteralParser::CopyStringFragment(
+    const Token &Tok, const char *TokBegin, StringRef Fragment,
+    llvm::TextEncodingConverter *Converter) {
+
   const llvm::UTF8 *ErrorPtrTmp;
-  if (ConvertUTF8toWide(CharByteWidth, Fragment, ResultPtr, ErrorPtrTmp))
+  if (ConvertUTF8toWide(CharByteWidth, Fragment, ResultPtr, ErrorPtrTmp)) {
+    if (Converter) {
+      assert(isOrdinary() && "Only ordinary literals are supported");
+      SmallString<64> CpConv;
+      char *Cp = ResultPtr - Fragment.size();
+      auto EC = Converter->convert(Fragment, CpConv);
+      if (!EC) {
+        memcpy(Cp, CpConv.data(), CpConv.size());
+        ResultPtr = Cp + CpConv.size();
+      } else { // there was a conversion error
+        if (Diags)
+          Diags->Report(Tok.getLocation(),
+                        diag::err_exec_charset_conversion_failed);
+      }
+    }
     return false;
+  }
 
   // If we see bad encoding for unprefixed string literals, warn and
   // simply copy the byte values, for compatibility with gcc and older
@@ -2602,7 +2559,7 @@ unsigned StringLiteralParser::getOffsetOfStringByte(const Token &Tok,
       ProcessCharEscape(SpellingStart, SpellingPtr, SpellingEnd, HadError,
                         FullSourceLoc(Tok.getLocation(), SM), CharByteWidth * 8,
                         Diags, Features, StringLiteralEvalMethod::Evaluated,
-                        nullptr);
+                        /*TextEncodingConfig=*/nullptr);
       --ByteNo;
     }
     assert(!HadError && "This method isn't valid on erroneous strings");
