@@ -491,6 +491,11 @@ struct VPlanTransforms {
                                          VPRecipeBuilder &RecipeBuilder,
                                          VPCostContext &CostCtx,
                                          LoopVectorizationLegality &Legal);
+
+  /// Make VPlan-based scalarization decision prior to delegating to the ones
+  /// made by the legacy CM.
+  static void makeScalarizationDecisions(VPlan &Plan, VFRange &Range,
+                                         VPRecipeBuilder &RecipeBuilder);
 };
 
 /// A helper function that returns true if the given type is irregular. The
